@@ -8,30 +8,44 @@ const { getSupabaseClient, isSupabaseAvailable } = require('../services/supabase
 const crypto = require('crypto');
 
 /**
- * Initialize Supabase tables (idempotent check)
- * Called once on startup
+ * Initialize Supabase tables (checks only, does NOT create tables)
+ * Call this on startup to verify schema exists
+ * @returns {Promise<{success: boolean, message: string}>}
  */
 async function initializeTables() {
   if (!isSupabaseAvailable()) {
-    console.warn('⚠️ Supabase not available. Command state persistence disabled.');
-    return false;
+    return {
+      success: false,
+      message: '❌ Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env'
+    };
   }
 
   try {
     const db = getSupabaseClient();
     
-    // Check if tables exist by attempting a query
-    await Promise.all([
+    // Test table existence by attempting a query
+    const results = await Promise.all([
       db.from('custom_commands').select('count', { count: 'exact', head: true }).limit(0),
       db.from('command_versions').select('count', { count: 'exact', head: true }).limit(0),
       db.from('command_audit_logs').select('count', { count: 'exact', head: true }).limit(0)
     ]);
 
-    console.log('✅ Command tables initialized in Supabase');
-    return true;
+    return {
+      success: true,
+      message: '✅ Command tables verified in Supabase'
+    };
   } catch (error) {
-    console.error('❌ Error initializing command tables:', error.message);
-    return false;
+    const msg = error.message || 'Unknown error';
+    if (msg.includes('does not exist') || msg.includes('relation')) {
+      return {
+        success: false,
+        message: `❌ Command tables do not exist in Supabase. Run the SQL migration: database/migrations/001_init_command_tables.sql\nError: ${msg}`
+      };
+    }
+    return {
+      success: false,
+      message: `❌ Error checking command tables: ${msg}`
+    };
   }
 }
 
@@ -81,11 +95,11 @@ async function auditLog(operation, commandName, category, performedBy, details =
  * @param {string} category - Category
  * @param {string} filePath - Relative file path
  * @param {string} author - Author JID
- * @returns {Promise<Object|null>}
+ * @returns {Promise<{data: Object|null, error: string|null}>}
  */
 async function createCommandMetadata(name, category, filePath, author) {
   if (!isSupabaseAvailable()) {
-    return null;
+    return { data: null, error: 'Supabase not available' };
   }
 
   try {
@@ -99,32 +113,34 @@ async function createCommandMetadata(name, category, filePath, author) {
       file_path: filePath,
       author,
       enabled: true,
-      version: 1,
+      version: 0, // Will be 1 after first version saved
       created_at: now,
       updated_at: now,
-      last_modified_by: author
+      last_modified_by: author,
+      deleted_at: null
     }).select().single();
 
     if (error) {
-      console.error('Error creating command metadata:', error.message);
-      return null;
+      if (error.code === '23505') { // Unique constraint violation
+        return { data: null, error: `Command "${name}" already exists` };
+      }
+      return { data: null, error: error.message };
     }
 
-    return data;
+    return { data, error: null };
   } catch (error) {
-    console.error('Error creating command metadata:', error.message);
-    return null;
+    return { data: null, error: error.message };
   }
 }
 
 /**
- * Get command metadata by name
+ * Get command metadata by name (excluding deleted commands)
  * @param {string} commandName - Command name
- * @returns {Promise<Object|null>}
+ * @returns {Promise<{data: Object|null, error: string|null}>}
  */
 async function getCommandMetadata(commandName) {
   if (!isSupabaseAvailable()) {
-    return null;
+    return { data: null, error: 'Supabase not available' };
   }
 
   try {
@@ -133,33 +149,36 @@ async function getCommandMetadata(commandName) {
       .from('custom_commands')
       .select('*')
       .eq('name', commandName)
+      .is('deleted_at', null)
       .single();
 
     if (error && error.code !== 'PGRST116') { // PGRST116 = no rows returned
-      console.error('Error getting command metadata:', error.message);
-      return null;
+      return { data: null, error: error.message };
     }
 
-    return data || null;
+    return { data: data || null, error: null };
   } catch (error) {
-    console.error('Error getting command metadata:', error.message);
-    return null;
+    return { data: null, error: error.message };
   }
 }
 
 /**
- * Get all commands (with optional filtering)
+ * Get all commands (excluding deleted, with optional filtering)
  * @param {string} category - Optional category filter
- * @returns {Promise<Array>}
+ * @returns {Promise<{data: Array, error: string|null}>}
  */
 async function getAllCommands(category = null) {
   if (!isSupabaseAvailable()) {
-    return [];
+    return { data: [], error: 'Supabase not available' };
   }
 
   try {
     const db = getSupabaseClient();
-    let query = db.from('custom_commands').select('*');
+    let query = db
+      .from('custom_commands')
+      .select('*')
+      .is('deleted_at', null)
+      .order('created_at', { ascending: false });
 
     if (category) {
       query = query.eq('category', category);
@@ -168,14 +187,12 @@ async function getAllCommands(category = null) {
     const { data, error } = await query;
 
     if (error) {
-      console.error('Error getting commands:', error.message);
-      return [];
+      return { data: [], error: error.message };
     }
 
-    return data || [];
+    return { data: data || [], error: null };
   } catch (error) {
-    console.error('Error getting commands:', error.message);
-    return [];
+    return { data: [], error: error.message };
   }
 }
 
@@ -183,32 +200,33 @@ async function getAllCommands(category = null) {
  * Update command metadata
  * @param {string} commandName - Command name
  * @param {Object} updates - Fields to update
- * @returns {Promise<boolean>}
+ * @returns {Promise<{data: Object|null, error: string|null}>}
  */
 async function updateCommandMetadata(commandName, updates) {
   if (!isSupabaseAvailable()) {
-    return false;
+    return { data: null, error: 'Supabase not available' };
   }
 
   try {
     const db = getSupabaseClient();
-    const { error } = await db
+    const { data, error } = await db
       .from('custom_commands')
       .update({
         ...updates,
         updated_at: new Date().toISOString()
       })
-      .eq('name', commandName);
+      .eq('name', commandName)
+      .is('deleted_at', null)
+      .select()
+      .single();
 
     if (error) {
-      console.error('Error updating command metadata:', error.message);
-      return false;
+      return { data: null, error: error.message };
     }
 
-    return true;
+    return { data, error: null };
   } catch (error) {
-    console.error('Error updating command metadata:', error.message);
-    return false;
+    return { data: null, error: error.message };
   }
 }
 
@@ -218,11 +236,11 @@ async function updateCommandMetadata(commandName, updates) {
  * @param {number} version - Version number
  * @param {string} content - JavaScript source code
  * @param {string} author - Author JID
- * @returns {Promise<Object|null>}
+ * @returns {Promise<{data: Object|null, error: string|null}>}
  */
 async function saveCommandVersion(commandId, version, content, author) {
   if (!isSupabaseAvailable()) {
-    return null;
+    return { data: null, error: 'Supabase not available' };
   }
 
   try {
@@ -236,14 +254,42 @@ async function saveCommandVersion(commandId, version, content, author) {
     }).select().single();
 
     if (error) {
-      console.error('Error saving command version:', error.message);
-      return null;
+      return { data: null, error: error.message };
     }
 
-    return data;
+    return { data, error: null };
   } catch (error) {
-    console.error('Error saving command version:', error.message);
-    return null;
+    return { data: null, error: error.message };
+  }
+}
+
+/**
+ * Get latest working version of a command
+ * @param {string} commandId - Command ID
+ * @returns {Promise<{data: Object|null, error: string|null}>}
+ */
+async function getLatestCommandVersion(commandId) {
+  if (!isSupabaseAvailable()) {
+    return { data: null, error: 'Supabase not available' };
+  }
+
+  try {
+    const db = getSupabaseClient();
+    const { data, error } = await db
+      .from('command_versions')
+      .select('*')
+      .eq('command_id', commandId)
+      .order('version', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (error && error.code !== 'PGRST116') {
+      return { data: null, error: error.message };
+    }
+
+    return { data: data || null, error: null };
+  } catch (error) {
+    return { data: null, error: error.message };
   }
 }
 
@@ -251,11 +297,11 @@ async function saveCommandVersion(commandId, version, content, author) {
  * Get specific command version
  * @param {string} commandId - Command ID
  * @param {number} version - Version number
- * @returns {Promise<Object|null>}
+ * @returns {Promise<{data: Object|null, error: string|null}>}
  */
 async function getCommandVersion(commandId, version) {
   if (!isSupabaseAvailable()) {
-    return null;
+    return { data: null, error: 'Supabase not available' };
   }
 
   try {
@@ -268,14 +314,12 @@ async function getCommandVersion(commandId, version) {
       .single();
 
     if (error && error.code !== 'PGRST116') {
-      console.error('Error getting command version:', error.message);
-      return null;
+      return { data: null, error: error.message };
     }
 
-    return data || null;
+    return { data: data || null, error: null };
   } catch (error) {
-    console.error('Error getting command version:', error.message);
-    return null;
+    return { data: null, error: error.message };
   }
 }
 
@@ -283,11 +327,11 @@ async function getCommandVersion(commandId, version) {
  * Get previous version (for rollback)
  * @param {string} commandId - Command ID
  * @param {number} currentVersion - Current version
- * @returns {Promise<Object|null>}
+ * @returns {Promise<{data: Object|null, error: string|null}>}
  */
 async function getPreviousVersion(commandId, currentVersion) {
   if (!isSupabaseAvailable()) {
-    return null;
+    return { data: null, error: 'Supabase not available' };
   }
 
   try {
@@ -302,14 +346,12 @@ async function getPreviousVersion(commandId, currentVersion) {
       .single();
 
     if (error && error.code !== 'PGRST116') {
-      console.error('Error getting previous version:', error.message);
-      return null;
+      return { data: null, error: error.message };
     }
 
-    return data || null;
+    return { data: data || null, error: null };
   } catch (error) {
-    console.error('Error getting previous version:', error.message);
-    return null;
+    return { data: null, error: error.message };
   }
 }
 
@@ -318,7 +360,7 @@ async function getPreviousVersion(commandId, currentVersion) {
  * @param {string} commandName - Command name
  * @param {boolean} enabled - Is enabled
  * @param {string} modifiedBy - Who modified it
- * @returns {Promise<boolean>}
+ * @returns {Promise<{data: Object|null, error: string|null}>}
  */
 async function setCommandEnabled(commandName, enabled, modifiedBy) {
   return updateCommandMetadata(commandName, {
@@ -330,22 +372,25 @@ async function setCommandEnabled(commandName, enabled, modifiedBy) {
 /**
  * Check if command is enabled
  * @param {string} commandName - Command name
- * @returns {Promise<boolean>}
+ * @returns {Promise<{enabled: boolean, error: string|null}>}
  */
 async function isCommandEnabled(commandName) {
-  const metadata = await getCommandMetadata(commandName);
-  return metadata ? metadata.enabled : true; // Default enabled if no metadata
+  const result = await getCommandMetadata(commandName);
+  if (result.error) {
+    return { enabled: true, error: result.error }; // Default enabled if error/no metadata
+  }
+  return { enabled: result.data ? result.data.enabled : true, error: null };
 }
 
 /**
  * Get audit log entries
  * @param {number} lines - Number of entries to return
  * @param {string} filter - Optional command name filter
- * @returns {Promise<Array>}
+ * @returns {Promise<{data: Array, error: string|null}>}
  */
 async function getAuditLog(lines = 50, filter = null) {
   if (!isSupabaseAvailable()) {
-    return [];
+    return { data: [], error: 'Supabase not available' };
   }
 
   try {
@@ -363,43 +408,75 @@ async function getAuditLog(lines = 50, filter = null) {
     const { data, error } = await query;
 
     if (error) {
-      console.error('Error getting audit log:', error.message);
-      return [];
+      return { data: [], error: error.message };
     }
 
-    return data || [];
+    return { data: data || [], error: null };
   } catch (error) {
-    console.error('Error getting audit log:', error.message);
-    return [];
+    return { data: [], error: error.message };
   }
 }
 
 /**
- * Delete command metadata (cascades to versions via foreign key)
+ * Soft-delete command (preserves version history and audit logs)
  * @param {string} commandName - Command name
- * @returns {Promise<boolean>}
+ * @param {string} deletedBy - Who deleted it
+ * @returns {Promise<{success: boolean, error: string|null}>}
  */
-async function deleteCommandMetadata(commandName) {
+async function deleteCommand(commandName, deletedBy) {
   if (!isSupabaseAvailable()) {
-    return false;
+    return { success: false, error: 'Supabase not available' };
   }
 
   try {
     const db = getSupabaseClient();
     const { error } = await db
       .from('custom_commands')
-      .delete()
+      .update({
+        deleted_at: new Date().toISOString(),
+        last_modified_by: deletedBy
+      })
+      .eq('name', commandName)
+      .is('deleted_at', null);
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    return { success: true, error: null };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Recover a deleted command
+ * @param {string} commandName - Command name
+ * @param {string} recoveredBy - Who recovered it
+ * @returns {Promise<{success: boolean, error: string|null}>}
+ */
+async function recoverCommand(commandName, recoveredBy) {
+  if (!isSupabaseAvailable()) {
+    return { success: false, error: 'Supabase not available' };
+  }
+
+  try {
+    const db = getSupabaseClient();
+    const { error } = await db
+      .from('custom_commands')
+      .update({
+        deleted_at: null,
+        last_modified_by: recoveredBy
+      })
       .eq('name', commandName);
 
     if (error) {
-      console.error('Error deleting command metadata:', error.message);
-      return false;
+      return { success: false, error: error.message };
     }
 
-    return true;
+    return { success: true, error: null };
   } catch (error) {
-    console.error('Error deleting command metadata:', error.message);
-    return false;
+    return { success: false, error: error.message };
   }
 }
 
@@ -412,10 +489,12 @@ module.exports = {
   getAllCommands,
   updateCommandMetadata,
   saveCommandVersion,
+  getLatestCommandVersion,
   getCommandVersion,
   getPreviousVersion,
   setCommandEnabled,
   isCommandEnabled,
   getAuditLog,
-  deleteCommandMetadata
+  deleteCommand,
+  recoverCommand
 };
