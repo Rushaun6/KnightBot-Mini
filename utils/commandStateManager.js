@@ -1,39 +1,39 @@
 /**
- * Command State Manager - Handles persistence and metadata for custom commands
- * Stores: command metadata, enabled/disabled state, version history, audit logs
+ * Command State Manager - Supabase-backed persistence layer
+ * Handles all command metadata, versioning, state, and audit logging
+ * NO local JSON files - all data persists in Supabase
  */
 
-const fs = require('fs');
-const path = require('path');
+const { getSupabaseClient, isSupabaseAvailable } = require('../services/supabase');
 const crypto = require('crypto');
 
-const DB_PATH = path.join(__dirname, '..', 'database');
-const COMMANDS_STATE_DB = path.join(DB_PATH, 'commands-state.json');
-const COMMANDS_AUDIT_LOG = path.join(DB_PATH, 'commands-audit.log');
-const COMMANDS_BACKUP_DIR = path.join(DB_PATH, 'commands-backup');
-
 /**
- * Initialize command state database and directories
+ * Initialize Supabase tables (idempotent check)
+ * Called once on startup
  */
-function initializeStateDB() {
-  if (!fs.existsSync(DB_PATH)) {
-    fs.mkdirSync(DB_PATH, { recursive: true });
+async function initializeTables() {
+  if (!isSupabaseAvailable()) {
+    console.warn('⚠️ Supabase not available. Command state persistence disabled.');
+    return false;
   }
 
-  if (!fs.existsSync(COMMANDS_BACKUP_DIR)) {
-    fs.mkdirSync(COMMANDS_BACKUP_DIR, { recursive: true });
-  }
+  try {
+    const db = getSupabaseClient();
+    
+    // Check if tables exist by attempting a query
+    await Promise.all([
+      db.from('custom_commands').select('count', { count: 'exact', head: true }).limit(0),
+      db.from('command_versions').select('count', { count: 'exact', head: true }).limit(0),
+      db.from('command_audit_logs').select('count', { count: 'exact', head: true }).limit(0)
+    ]);
 
-  if (!fs.existsSync(COMMANDS_STATE_DB)) {
-    fs.writeFileSync(COMMANDS_STATE_DB, JSON.stringify({}, null, 2));
-  }
-
-  if (!fs.existsSync(COMMANDS_AUDIT_LOG)) {
-    fs.writeFileSync(COMMANDS_AUDIT_LOG, '');
+    console.log('✅ Command tables initialized in Supabase');
+    return true;
+  } catch (error) {
+    console.error('❌ Error initializing command tables:', error.message);
+    return false;
   }
 }
-
-initializeStateDB();
 
 /**
  * Generate unique command ID
@@ -45,97 +45,272 @@ function generateCommandId(name) {
 }
 
 /**
- * Read command state database
- * @returns {Object}
- */
-function readStateDB() {
-  try {
-    const data = fs.readFileSync(COMMANDS_STATE_DB, 'utf-8');
-    return JSON.parse(data) || {};
-  } catch (error) {
-    console.error('Error reading command state:', error.message);
-    return {};
-  }
-}
-
-/**
- * Write command state database atomically (write to temp, then rename)
- * @param {Object} data - State data
- * @returns {boolean}
- */
-function writeStateDB(data) {
-  try {
-    const tmpFile = `${COMMANDS_STATE_DB}.tmp`;
-    fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2));
-    fs.renameSync(tmpFile, COMMANDS_STATE_DB);
-    return true;
-  } catch (error) {
-    console.error('Error writing command state:', error.message);
-    return false;
-  }
-}
-
-/**
- * Append audit log entry
- * @param {string} operation - Operation type (create, edit, delete, enable, disable, reload)
+ * Log audit event to Supabase
+ * @param {string} operation - Operation type
  * @param {string} commandName - Command name
- * @param {string} category - Command category
+ * @param {string} category - Category
+ * @param {string} performedBy - Owner JID who performed it
  * @param {string} details - Additional details
  * @param {boolean} success - Operation success
  */
-function auditLog(operation, commandName, category, details = '', success = true) {
+async function auditLog(operation, commandName, category, performedBy, details = '', success = true) {
+  if (!isSupabaseAvailable()) {
+    console.warn(`[AUDIT] ${operation} ${category}/${commandName} - ${details}`);
+    return;
+  }
+
   try {
-    const timestamp = new Date().toISOString();
-    const status = success ? 'SUCCESS' : 'FAILED';
-    const logEntry = `[${timestamp}] ${status} - ${operation.toUpperCase()} - ${category}/${commandName} - ${details}\n`;
-    fs.appendFileSync(COMMANDS_AUDIT_LOG, logEntry);
+    const db = getSupabaseClient();
+    await db.from('command_audit_logs').insert({
+      operation,
+      command_name: commandName,
+      category,
+      details,
+      success,
+      performed_by: performedBy,
+      created_at: new Date().toISOString()
+    });
   } catch (error) {
     console.error('Error writing audit log:', error.message);
   }
 }
 
 /**
- * Create new command metadata
+ * Create command metadata in Supabase
  * @param {string} name - Command name
  * @param {string} category - Category
- * @param {string} author - Author (owner JID)
- * @returns {Object}
+ * @param {string} filePath - Relative file path
+ * @param {string} author - Author JID
+ * @returns {Promise<Object|null>}
  */
-function createCommandMetadata(name, category, author) {
-  return {
-    id: generateCommandId(name),
-    name,
-    category,
-    author,
-    enabled: true,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    version: 1,
-    previousVersions: [],
-    lastModifiedBy: author
-  };
+async function createCommandMetadata(name, category, filePath, author) {
+  if (!isSupabaseAvailable()) {
+    return null;
+  }
+
+  try {
+    const db = getSupabaseClient();
+    const now = new Date().toISOString();
+    
+    const { data, error } = await db.from('custom_commands').insert({
+      id: generateCommandId(name),
+      name,
+      category,
+      file_path: filePath,
+      author,
+      enabled: true,
+      version: 1,
+      created_at: now,
+      updated_at: now,
+      last_modified_by: author
+    }).select().single();
+
+    if (error) {
+      console.error('Error creating command metadata:', error.message);
+      return null;
+    }
+
+    return data;
+  } catch (error) {
+    console.error('Error creating command metadata:', error.message);
+    return null;
+  }
 }
 
 /**
  * Get command metadata by name
  * @param {string} commandName - Command name
- * @returns {Object|null}
+ * @returns {Promise<Object|null>}
  */
-function getCommandMetadata(commandName) {
-  const state = readStateDB();
-  return state[commandName] || null;
+async function getCommandMetadata(commandName) {
+  if (!isSupabaseAvailable()) {
+    return null;
+  }
+
+  try {
+    const db = getSupabaseClient();
+    const { data, error } = await db
+      .from('custom_commands')
+      .select('*')
+      .eq('name', commandName)
+      .single();
+
+    if (error && error.code !== 'PGRST116') { // PGRST116 = no rows returned
+      console.error('Error getting command metadata:', error.message);
+      return null;
+    }
+
+    return data || null;
+  } catch (error) {
+    console.error('Error getting command metadata:', error.message);
+    return null;
+  }
 }
 
 /**
- * Save command metadata
- * @param {string} commandName - Command name
- * @param {Object} metadata - Metadata object
- * @returns {boolean}
+ * Get all commands (with optional filtering)
+ * @param {string} category - Optional category filter
+ * @returns {Promise<Array>}
  */
-function saveCommandMetadata(commandName, metadata) {
-  const state = readStateDB();
-  state[commandName] = metadata;
-  return writeStateDB(state);
+async function getAllCommands(category = null) {
+  if (!isSupabaseAvailable()) {
+    return [];
+  }
+
+  try {
+    const db = getSupabaseClient();
+    let query = db.from('custom_commands').select('*');
+
+    if (category) {
+      query = query.eq('category', category);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error('Error getting commands:', error.message);
+      return [];
+    }
+
+    return data || [];
+  } catch (error) {
+    console.error('Error getting commands:', error.message);
+    return [];
+  }
+}
+
+/**
+ * Update command metadata
+ * @param {string} commandName - Command name
+ * @param {Object} updates - Fields to update
+ * @returns {Promise<boolean>}
+ */
+async function updateCommandMetadata(commandName, updates) {
+  if (!isSupabaseAvailable()) {
+    return false;
+  }
+
+  try {
+    const db = getSupabaseClient();
+    const { error } = await db
+      .from('custom_commands')
+      .update({
+        ...updates,
+        updated_at: new Date().toISOString()
+      })
+      .eq('name', commandName);
+
+    if (error) {
+      console.error('Error updating command metadata:', error.message);
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error('Error updating command metadata:', error.message);
+    return false;
+  }
+}
+
+/**
+ * Save command version to Supabase
+ * @param {string} commandId - Command ID
+ * @param {number} version - Version number
+ * @param {string} content - JavaScript source code
+ * @param {string} author - Author JID
+ * @returns {Promise<Object|null>}
+ */
+async function saveCommandVersion(commandId, version, content, author) {
+  if (!isSupabaseAvailable()) {
+    return null;
+  }
+
+  try {
+    const db = getSupabaseClient();
+    const { data, error } = await db.from('command_versions').insert({
+      command_id: commandId,
+      version,
+      content,
+      author,
+      created_at: new Date().toISOString()
+    }).select().single();
+
+    if (error) {
+      console.error('Error saving command version:', error.message);
+      return null;
+    }
+
+    return data;
+  } catch (error) {
+    console.error('Error saving command version:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Get specific command version
+ * @param {string} commandId - Command ID
+ * @param {number} version - Version number
+ * @returns {Promise<Object|null>}
+ */
+async function getCommandVersion(commandId, version) {
+  if (!isSupabaseAvailable()) {
+    return null;
+  }
+
+  try {
+    const db = getSupabaseClient();
+    const { data, error } = await db
+      .from('command_versions')
+      .select('*')
+      .eq('command_id', commandId)
+      .eq('version', version)
+      .single();
+
+    if (error && error.code !== 'PGRST116') {
+      console.error('Error getting command version:', error.message);
+      return null;
+    }
+
+    return data || null;
+  } catch (error) {
+    console.error('Error getting command version:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Get previous version (for rollback)
+ * @param {string} commandId - Command ID
+ * @param {number} currentVersion - Current version
+ * @returns {Promise<Object|null>}
+ */
+async function getPreviousVersion(commandId, currentVersion) {
+  if (!isSupabaseAvailable()) {
+    return null;
+  }
+
+  try {
+    const db = getSupabaseClient();
+    const { data, error } = await db
+      .from('command_versions')
+      .select('*')
+      .eq('command_id', commandId)
+      .lt('version', currentVersion)
+      .order('version', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (error && error.code !== 'PGRST116') {
+      console.error('Error getting previous version:', error.message);
+      return null;
+    }
+
+    return data || null;
+  } catch (error) {
+    console.error('Error getting previous version:', error.message);
+    return null;
+  }
 }
 
 /**
@@ -143,149 +318,104 @@ function saveCommandMetadata(commandName, metadata) {
  * @param {string} commandName - Command name
  * @param {boolean} enabled - Is enabled
  * @param {string} modifiedBy - Who modified it
- * @returns {boolean}
+ * @returns {Promise<boolean>}
  */
-function setCommandEnabled(commandName, enabled, modifiedBy) {
-  const metadata = getCommandMetadata(commandName);
-  if (!metadata) return false;
-
-  metadata.enabled = enabled;
-  metadata.updatedAt = new Date().toISOString();
-  metadata.lastModifiedBy = modifiedBy;
-
-  return saveCommandMetadata(commandName, metadata);
+async function setCommandEnabled(commandName, enabled, modifiedBy) {
+  return updateCommandMetadata(commandName, {
+    enabled,
+    last_modified_by: modifiedBy
+  });
 }
 
 /**
  * Check if command is enabled
  * @param {string} commandName - Command name
- * @returns {boolean}
+ * @returns {Promise<boolean>}
  */
-function isCommandEnabled(commandName) {
-  const metadata = getCommandMetadata(commandName);
-  return metadata ? metadata.enabled : true; // Default to enabled if no metadata
-}
-
-/**
- * Backup previous command version
- * @param {string} commandName - Command name
- * @param {string} category - Category
- * @param {string} content - File content
- * @returns {string} - Backup file path
- */
-function backupCommand(commandName, category, content) {
-  try {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const backupPath = path.join(COMMANDS_BACKUP_DIR, `${commandName}-v${timestamp}.js`);
-    fs.writeFileSync(backupPath, content);
-    return backupPath;
-  } catch (error) {
-    console.error('Error creating backup:', error.message);
-    return null;
-  }
-}
-
-/**
- * Restore command from backup
- * @param {string} backupPath - Path to backup file
- * @param {string} commandName - Command name
- * @param {string} category - Category
- * @returns {boolean}
- */
-function restoreFromBackup(backupPath, commandName, category) {
-  try {
-    if (!fs.existsSync(backupPath)) {
-      return false;
-    }
-
-    const content = fs.readFileSync(backupPath, 'utf-8');
-    const targetPath = path.join(__dirname, '..', 'commands', category, `${commandName}.js`);
-
-    fs.writeFileSync(targetPath, content);
-    return true;
-  } catch (error) {
-    console.error('Error restoring from backup:', error.message);
-    return false;
-  }
-}
-
-/**
- * Get recent command versions for rollback
- * @param {string} commandName - Command name
- * @returns {Array}
- */
-function getCommandBackups(commandName) {
-  try {
-    const files = fs.readdirSync(COMMANDS_BACKUP_DIR);
-    return files
-      .filter(f => f.startsWith(commandName))
-      .sort()
-      .reverse()
-      .slice(0, 5); // Last 5 versions
-  } catch (error) {
-    console.error('Error reading backups:', error.message);
-    return [];
-  }
-}
-
-/**
- * Record command edit in metadata version history
- * @param {string} commandName - Command name
- * @param {string} modifiedBy - Who modified it
- * @param {string} backupPath - Path to backup
- * @returns {boolean}
- */
-function recordVersion(commandName, modifiedBy, backupPath) {
-  const metadata = getCommandMetadata(commandName);
-  if (!metadata) return false;
-
-  if (!metadata.previousVersions) {
-    metadata.previousVersions = [];
-  }
-
-  metadata.previousVersions.push({
-    version: metadata.version,
-    backupPath,
-    createdAt: metadata.updatedAt,
-    modifiedBy: metadata.lastModifiedBy
-  });
-
-  metadata.version++;
-  metadata.updatedAt = new Date().toISOString();
-  metadata.lastModifiedBy = modifiedBy;
-
-  return saveCommandMetadata(commandName, metadata);
+async function isCommandEnabled(commandName) {
+  const metadata = await getCommandMetadata(commandName);
+  return metadata ? metadata.enabled : true; // Default enabled if no metadata
 }
 
 /**
  * Get audit log entries
- * @param {number} lines - Number of lines to return
- * @returns {Array}
+ * @param {number} lines - Number of entries to return
+ * @param {string} filter - Optional command name filter
+ * @returns {Promise<Array>}
  */
-function getAuditLog(lines = 50) {
+async function getAuditLog(lines = 50, filter = null) {
+  if (!isSupabaseAvailable()) {
+    return [];
+  }
+
   try {
-    const content = fs.readFileSync(COMMANDS_AUDIT_LOG, 'utf-8');
-    return content.split('\n').filter(l => l.trim()).slice(-lines);
+    const db = getSupabaseClient();
+    let query = db
+      .from('command_audit_logs')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(lines);
+
+    if (filter) {
+      query = query.eq('command_name', filter);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error('Error getting audit log:', error.message);
+      return [];
+    }
+
+    return data || [];
   } catch (error) {
-    console.error('Error reading audit log:', error.message);
+    console.error('Error getting audit log:', error.message);
     return [];
   }
 }
 
+/**
+ * Delete command metadata (cascades to versions via foreign key)
+ * @param {string} commandName - Command name
+ * @returns {Promise<boolean>}
+ */
+async function deleteCommandMetadata(commandName) {
+  if (!isSupabaseAvailable()) {
+    return false;
+  }
+
+  try {
+    const db = getSupabaseClient();
+    const { error } = await db
+      .from('custom_commands')
+      .delete()
+      .eq('name', commandName);
+
+    if (error) {
+      console.error('Error deleting command metadata:', error.message);
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error('Error deleting command metadata:', error.message);
+    return false;
+  }
+}
+
 module.exports = {
-  initializeStateDB,
+  initializeTables,
   generateCommandId,
-  readStateDB,
-  writeStateDB,
   auditLog,
   createCommandMetadata,
   getCommandMetadata,
-  saveCommandMetadata,
+  getAllCommands,
+  updateCommandMetadata,
+  saveCommandVersion,
+  getCommandVersion,
+  getPreviousVersion,
   setCommandEnabled,
   isCommandEnabled,
-  backupCommand,
-  restoreFromBackup,
-  getCommandBackups,
-  recordVersion,
-  getAuditLog
+  getAuditLog,
+  deleteCommandMetadata
 };
