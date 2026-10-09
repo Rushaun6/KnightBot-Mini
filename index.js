@@ -191,13 +191,13 @@ async function startBot() {
   const sessionFolder = `./${config.sessionName}`;
   const sessionFile = path.join(sessionFolder, 'creds.json');
 
-  // Check if sessionID is provided and process KnightBot! format session
-  if (config.sessionID && config.sessionID.startsWith('KnightBot!')) {
+  // Check if sessionID is provided and process madman! format session
+  if (config.sessionID && config.sessionID.startsWith('madman!')) {
     try {
       const [header, b64data] = config.sessionID.split('!');
 
-      if (header !== 'KnightBot' || !b64data) {
-        throw new Error("❌ Invalid session format. Expected 'KnightBot!.....'");
+      if (header !== 'madman' || !b64data) {
+        throw new Error("❌ Invalid session format. Expected 'madman!.....'");
       }
 
       const cleanB64 = b64data.replace('...', '');
@@ -211,10 +211,10 @@ async function startBot() {
 
       // Write decompressed session data to creds.json
       fs.writeFileSync(sessionFile, decompressedData, 'utf8');
-      console.log('📡 Session : 🔑 Retrieved from KnightBot Session');
+      console.log('📡 Session : 🔑 Retrieved from madman.inc Session');
 
     } catch (e) {
-      console.error('📡 Session : ❌ Error processing KnightBot session:', e.message);
+      console.error('📡 Session : ❌ Error processing madman.inc session:', e.message);
       // Continue with normal QR flow if session processing fails
     }
   }
