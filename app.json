@@ -1,5 +1,5 @@
 {
-  "name": "Knight Bot MINI",
+  "name": "Madman.Inc",
   "description": "WhatsApp MD bot (Baileys)",
   "repository": "",
   "keywords": ["whatsapp", "baileys", "bot", "node"],
@@ -10,10 +10,9 @@
   ],
   "env": {
     "SESSION_ID": {
-      "description": "KnightBot session string (e.g. KnightBot!<base64_compressed_data>)",
+      "description": "madman.inc session string (e.g. madman!<base64_compressed_data>)",
       "required": false,
       "value": ""
     }
   }
 }
-
