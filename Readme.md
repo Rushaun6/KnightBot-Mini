@@ -1,17 +1,17 @@
 <div align="center">
 
-## Knight Bot Mini
+## Madman.Inc
 
 [![Made with Baileys](https://img.shields.io/badge/Made%20with-Baileys-00bcd4?style=for-the-badge)](https://github.com/WhiskeySockets/Baileys)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-339933?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 
-<img src="utils/bot_image.jpg" alt="Knight Bot" width="260">
+<img src="utils/bot_image.jpg" alt="Madman.Inc Bot" width="260">
 
 </div>
 
-Knight Bot Mini is a WhatsApp MD bot built on top of the **Baileys** library.  
-It’s designed to be fast, lightweight, and easy to customize without touching the core code.  
+Madman.Inc is a WhatsApp MD bot built on top of the **Baileys** library.  
+It's designed to be fast, lightweight, and easy to customize without touching the core code.  
 This project is **fully open source** — you can modify it, rebrand it, and make your **own bot** from this codebase **free of cost**, without needing any permission from our side.  
 All commands and the overall structure are written in a way that makes customization (bot image, prefix, name, features, etc.) as easy as possible.
 
@@ -32,13 +32,13 @@ All commands and the overall structure are written in a way that makes customiza
 
 <div align="center">
 
-<a href="https://github.com/mruniquehacker/Knightbot-MD/fork" target="_blank">
+<a href="https://github.com/Rushaun6/KnightBot-Mini/fork" target="_blank">
   <img src="https://img.shields.io/badge/Fork%20Repository-GitHub-181717?style=for-the-badge&logo=github&logoColor=white" alt="Fork on GitHub">
 </a>
 
 </div>
 
-> This creates your own copy of `Knightbot-MD` under your GitHub account.
+> This creates your own copy of `Madman.Inc` under your GitHub account.
 
 ---
 
@@ -57,13 +57,13 @@ Deploy a small helper to generate a **pair code** and obtain your session string
 After scanning, you will receive a **session string** starting with:
 
 ```text
-KnightBot!H4....
+madman!H4....
 ```
 
 Copy that full string and paste it into `config.js`:
 
 ```js
-sessionID: 'KnightBot!H4.....'
+sessionID: 'madman!H4.....'
 ```
 
 Or set it via the `SESSION_ID` environment variable when hosting.
@@ -91,8 +91,8 @@ For a full step‑by‑step deployment tutorial (panels / VPS / Heroku), add or 
 ### 1️⃣ Clone the repository
 
 ```bash
-git clone https://github.com/mruniquehacker/Knightbot-MD.git
-cd Knightbot-MD
+git clone https://github.com/Rushaun6/KnightBot-Mini.git
+cd KnightBot-Mini
 ```
 
 ### 2️⃣ Install dependencies
@@ -108,7 +108,7 @@ Edit `config.js`:
 - **Option A: Use session string**
 
   ```js
-  sessionID: 'KnightBot!H4.....'
+  sessionID: 'madman!H4.....'
   ```
 
 - **Option B: Scan QR**
@@ -150,7 +150,8 @@ When the bot starts:
 
 ## 🙏 Credits
 
-- **Mr Unique Hacker** – Main developer & maintainer  
+- **Rushaun6** – Fork maintainer  
+- **Mr Unique Hacker** – Original developer  
 - **Baileys** – WhatsApp Web API library (`@whiskeysockets/baileys`)  
 - Other open‑source libraries listed in `package.json`
 
@@ -160,7 +161,7 @@ When the bot starts:
 
 - This bot is created **for educational purposes only**.  
 - This is **NOT** an official WhatsApp bot.  
-- Using third‑party bots **may violate WhatsApp’s Terms of Service** and can lead to your account being **banned**.
+- Using third‑party bots **may violate WhatsApp's Terms of Service** and can lead to your account being **banned**.
 
 > You use this bot **at your own risk**.  
 > The developers are **not responsible** for any bans, issues, or damages resulting from its use.
@@ -192,7 +193,7 @@ You must:
 
 ## 📜 Copyright Notice
 
-Copyright (c) **2026 Professor**.  
+Copyright (c) **2026 Rushaun6**.  
 All rights reserved.
 
 This project contains code from various open‑source projects and AI tools, including but not limited to:
